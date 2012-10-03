@@ -40,6 +40,8 @@ class Phpwatcher
 				return $file;
 			}
 		}
+
+		return false;
 	}
 
 	private function _populate()
