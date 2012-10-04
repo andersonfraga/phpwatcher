@@ -7,7 +7,6 @@ function phpwatcher($glob, \Closure $func)
 	while(1) {
 		if($updated = $watch->isUpdated()) {
 			$func($updated);
-			sleep(5);
 		}
 
 		sleep(1);
