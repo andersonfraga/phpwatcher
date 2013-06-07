@@ -5,9 +5,18 @@ function phpwatcher($path, $pattern, \Closure $func)
     $watch = new Phpwatcher($path, $pattern);
 
     $watch->isUpdated();
-    echo "{$watch->getNumFiles()} files in standby\n";
+    $numFiles = 0;
 
     while(1) {
+        if ($numFiles != $watch->getNumFiles()) {
+            $numFiles = $watch->getNumFiles();
+            echo "{$watch->getNumFiles()} files in standby\n";
+        }
+
+        if (date('s') % 30 == 0) {
+            $watch->clearCache();
+        }
+
         if($updated = $watch->isUpdated()) {
             $func($updated);
         }
@@ -27,17 +36,30 @@ class Phpwatcher
         $this->_pattern = $pattern;
     }
 
+
+    public function clearCache()
+    {
+        clearstatcache();
+        $this->_cache = array();
+    }
+
     public function isUpdated()
     {
         if(empty($this->_cache)) {
             $this->_populate();
         }
 
-        foreach($this->_cache as $file => $mtime) {
-            $new_mtime = filemtime($file);
+        foreach($this->_cache as $file => $actual_md5) {
+            if (!is_file($file)) {
+                $this->clearCache();
+                $this->_populate();
+                return false;
+            }
 
-            if($new_mtime != $mtime) {
-                $this->setCache($file, $new_mtime);
+            $new_md5 = md5_file($file);
+
+            if($new_md5 != $actual_md5) {
+                $this->setCache($file, $new_md5);
                 $this->sortCache();
 
                 return $file;
@@ -59,15 +81,15 @@ class Phpwatcher
 
         foreach($files as $file) {
             $file = $file[0];
-            $this->setCache($file, filemtime($file));
+            $this->setCache($file, md5_file($file));
         }
 
         $this->sortCache();
     }
 
-    private function setCache($file, $mtime)
+    private function setCache($file, $md5_file)
     {
-        $this->_cache[$file] = $mtime;
+        $this->_cache[$file] = $md5_file;
     }
 
     private function sortCache()
