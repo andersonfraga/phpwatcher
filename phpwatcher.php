@@ -1,99 +1,119 @@
 <?php
 
-function phpwatcher($path, $pattern, \Closure $func)
+function phpwatcher(array $path, $pattern, \Closure $func)
 {
     $watch = new Phpwatcher($path, $pattern);
-
-    $watch->isUpdated();
     $numFiles = 0;
 
-    while(1) {
-        if ($numFiles != $watch->getNumFiles()) {
-            $numFiles = $watch->getNumFiles();
-            echo "{$watch->getNumFiles()} files in standby\n";
-        }
-
-        if (date('s') % 30 == 0) {
-            $watch->clearCache();
-        }
-
-        if($updated = $watch->isUpdated()) {
-            $func($updated);
-        }
-
-        sleep(1);
+    while($file = $watch->hasUpdate()) {
+        $func($file->getPathname(), $file);
     }
 }
 
 class Phpwatcher
 {
-    private $_pattern, $_path;
-    private $_cache = array();
+    private $_pattern;
+    private $_observer;
 
-    public function __construct($path, $pattern)
+    public function __construct(array $path, $pattern)
     {
-        $this->_path    = $path;
         $this->_pattern = $pattern;
+        $this->_observer = new BruteForceWatcher($path, "/{$this->_pattern}/is");
+
     }
 
-
-    public function clearCache()
+    public function hasUpdate()
     {
-        clearstatcache();
-        $this->_cache = array();
-    }
-
-    public function isUpdated()
-    {
-        if(empty($this->_cache)) {
-            $this->_populate();
+        if ($file = $this->_observer->watch()) {
+            return $file;
         }
+    }
+};
 
-        foreach($this->_cache as $file => $actual_md5) {
-            if (!is_file($file)) {
-                $this->clearCache();
-                $this->_populate();
-                return false;
+class BruteForceWatcher
+{
+    private $paths = array(), $watch = array(), $identifier = array(), $regex;
+
+    function __construct(array $path, $regex)
+    {
+        $this->paths = $path;
+        $this->regex = $regex;
+    }
+
+    public function watch()
+    {
+        $this->createList();
+
+        echo 'Watching ' . count($this->watch) . ' files in: '
+            . PHP_EOL . ' - ' . implode("\n - ", $this->paths) . PHP_EOL;
+
+        arsort($this->watch);
+
+        do {
+            foreach ($this->watch as $_file => $mtime) {
+                if (filemtime($_file) != $mtime) {
+                    $this->watch[$_file] = filemtime($_file);
+
+                    $file = new FileChangedWatcher($_file);
+                    $file->setIsModified();
+                    $file->setPathIdentifier($this->identifier[$_file] . DIRECTORY_SEPARATOR);
+
+                    return $file;
+                }
             }
+        }
+        while(sleep(1) == 0);
+    }
 
-            $new_md5 = md5_file($file);
 
-            if($new_md5 != $actual_md5) {
-                $this->setCache($file, $new_md5);
-                $this->sortCache();
+    private function createList()
+    {
+        $this->watch = $this->identifier = array();
 
-                return $file;
+        foreach ($this->paths as $value) {
+            $listPaths = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($value, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST
+            );
+
+            foreach ($listPaths as $_path) {
+                if ($_path->isFile()) {
+                    $file = $_path->getPathname();
+
+                    if (preg_match($this->regex, $file)) {
+                        $this->watch[$file]      = filemtime($file);
+                        $this->identifier[$file] = $value;
+                    }
+                }
             }
         }
-
-        return false;
     }
+};
 
-    public function getNumFiles()
+class FileChangedWatcher extends SplFileInfo
+{
+    private $_isCreated = false, $_isUpdated = false, $_isDeleted = false, $_identifier;
+
+    public function __call($method, array $value)
     {
-        return count($this->_cache);
-    }
-
-    private function _populate()
-    {
-        $ite    = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->_path));
-        $files  = new RegexIterator($ite, '/' . $this->_pattern . '/', RecursiveRegexIterator::GET_MATCH);
-
-        foreach($files as $file) {
-            $file = $file[0];
-            $this->setCache($file, md5_file($file));
+        if (preg_match('/setIs([A-Z])([A-Z]+)/', $method, $match)) {
+            $var = "_is{$match[1]}{$match[1]}";
+            return $this->$var = true;
         }
 
-        $this->sortCache();
+        if (preg_match('/get([A-Z])([A-Z]+)/', $method, $match)) {
+            $var = "_is{$match[1]}{$match[1]}";
+            return $this->$var;
+        }
     }
 
-    private function setCache($file, $md5_file)
+    public function setPathIdentifier($identifier)
     {
-        $this->_cache[$file] = $md5_file;
+        $this->_identifier = $identifier;
     }
 
-    private function sortCache()
+    public function getPathIdentifier()
     {
-        asort($this->_cache);
+        return $this->_identifier;
     }
 };
