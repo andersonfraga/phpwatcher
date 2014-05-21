@@ -6,7 +6,7 @@ function phpwatcher(array $path, $pattern, \Closure $func)
     $numFiles = 0;
 
     while($file = $watch->hasUpdate()) {
-        $func($file->getPathname(), $file);
+        $func($file->getPathname(), $file, $watch->listObservablesFiles());
     }
 }
 
@@ -17,22 +17,47 @@ class Phpwatcher
 
     public function __construct(array $path, $pattern)
     {
-        $this->_pattern = $pattern;
+        $this->_pattern  = $pattern;
         $this->_observer = new BruteForceWatcher($path, "/{$this->_pattern}/is");
-
     }
 
     public function hasUpdate()
     {
-        if ($file = $this->_observer->watch()) {
-            return $file;
+        list($paths, $files) = $this->_observer->header();
+
+        echo self::createMsg('Watching %s files in', count($files), $paths);
+
+        do {
+            if ($added = $this->_observer->addedFiles()) {
+                echo self::createMsg('Added %s new file' . (count($added) > 1 ? 's' : ''), count($added), $added);
+            }
+
+            if ($deleted = $this->_observer->deletedFiles()) {
+                echo self::createMsg('Deleted %s file' . (count($deleted) > 1 ? 's' : ''), count($deleted), $deleted);
+            }
+
+            if ($files = $this->_observer->updatedFiles()) {
+                return array_shift($files);
+            }
         }
+        while (1);
+    }
+
+    static private function createMsg($msg, $counter, $elements)
+    {
+        $suffix = PHP_EOL . ' - ';
+        return sprintf("{$msg}:{$suffix}%s\n", $counter, implode($suffix , $elements));
+    }
+
+    public function listObservablesFiles()
+    {
+        return $this->_observer->getFiles();
     }
 };
 
 class BruteForceWatcher
 {
-    private $paths = array(), $watch = array(), $identifier = array(), $regex;
+    private $paths = array(), $watch = array(), $identifier = array(), $regex, $lastUpdated;
 
     function __construct(array $path, $regex)
     {
@@ -40,53 +65,89 @@ class BruteForceWatcher
         $this->regex = $regex;
     }
 
-    public function watch()
+    public function getFiles()
     {
-        $this->createList();
+        return array_keys($this->watch);
+    }
 
-        echo 'Watching ' . count($this->watch) . ' files in: '
-            . PHP_EOL . ' - ' . implode("\n - ", $this->paths) . PHP_EOL;
+    public function header()
+    {
+        list($this->watch, $this->identifier) = $this->createList();
+        arsort($this->watch, SORT_NUMERIC);
+        $this->lastUpdated = time();
 
-        arsort($this->watch);
+        return array($this->paths, $this->watch);
+    }
 
-        do {
-            foreach ($this->watch as $_file => $mtime) {
-                if (filemtime($_file) != $mtime) {
-                    $this->watch[$_file] = filemtime($_file);
+    private function checkChanges()
+    {
+        $actualWatch = $this->watch;
 
-                    $file = new FileChangedWatcher($_file);
-                    $file->setIsModified();
-                    $file->setPathIdentifier($this->identifier[$_file] . DIRECTORY_SEPARATOR);
+        if (time() - $this->lastUpdated > 10) {
+            $this->lastUpdated = time();
+            list($this->watch, $this->identifier) = $this->createList();
+        }
 
-                    return $file;
-                }
+        $actualWatch = array_keys($actualWatch);
+        $newWatch    = array_keys($this->watch);
+
+        return array($actualWatch, $newWatch);
+    }
+
+    public function addedFiles()
+    {
+        list($actualWatch, $newWatch) = $this->checkChanges();
+        return array_diff($newWatch, $actualWatch);
+    }
+
+    public function deletedFiles()
+    {
+        list($actualWatch, $newWatch) = $this->checkChanges();
+        return array_diff($actualWatch, $newWatch);
+    }
+
+    public function updatedFiles()
+    {
+        $updated = array();
+
+        foreach ($this->watch as $_file => $mtime) {
+            $newmtime = (is_file($_file)) ? filemtime($_file) : null;
+
+            if ($newmtime and $newmtime != $mtime) {
+                $this->watch[$_file] = $newmtime;
+
+                $file = new FileChangedWatcher($_file);
+                $file->setIsModified();
+                $file->setPathIdentifier($this->identifier[$_file] . DIRECTORY_SEPARATOR);
+
+                $updated[] = $file;
             }
         }
-        while(sleep(1) == 0);
+
+        return $updated;
     }
 
 
     private function createList()
     {
-        $this->watch = $this->identifier = array();
+        $watch = $identifier = array();
 
         foreach ($this->paths as $value) {
-            $listPaths = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($value, FilesystemIterator::SKIP_DOTS),
-                RecursiveIteratorIterator::SELF_FIRST
+            $listPaths = new RegexIterator(
+                new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($value),
+                    RecursiveIteratorIterator::SELF_FIRST
+                ),
+                $this->regex
             );
 
-            foreach ($listPaths as $_path) {
-                if ($_path->isFile()) {
-                    $file = $_path->getPathname();
-
-                    if (preg_match($this->regex, $file)) {
-                        $this->watch[$file]      = filemtime($file);
-                        $this->identifier[$file] = $value;
-                    }
-                }
+            foreach ($listPaths as $file => $_path) {
+                $watch[$file]      = $_path->getMTime();
+                $identifier[$file] = $value;
             }
         }
+
+        return array($watch, $identifier);
     }
 };
 
