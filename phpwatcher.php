@@ -1,24 +1,31 @@
 <?php
 
-function phpwatcher(array $path, $pattern, \Closure $func)
+function phpwatcher($path, $pattern, Closure $func)
 {
+    if (!empty($path) and is_string($path)) {
+        $path = array($path);
+    }
+
+    foreach ($path as $_ => $value) {
+        $path[$_] = realpath($value);
+    }
+
     $watch = new Phpwatcher($path, $pattern);
     $numFiles = 0;
 
     while($file = $watch->hasUpdate()) {
-        $func($file->getPathname(), $file, $watch->listObservablesFiles());
+        $func($file->getFile(), $file, $watch->listObservableFiles());
     }
 }
 
 class Phpwatcher
 {
-    private $_pattern;
-    private $_observer;
+    private $_pattern, $_observer;
 
     public function __construct(array $path, $pattern)
     {
         $this->_pattern  = $pattern;
-        $this->_observer = new BruteForceWatcher($path, "/{$this->_pattern}/is");
+        $this->_observer = new BruteForceWatcher($path, "/{$this->_pattern}/i");
     }
 
     public function hasUpdate()
@@ -28,16 +35,19 @@ class Phpwatcher
         echo self::createMsg('Watching %s files in', count($files), $paths);
 
         do {
+            if ($updated = $this->_observer->updatedFiles()) {
+                echo self::createMsg('Updated %s file' . (count($updated) > 1 ? 's' : ''), count($updated), $updated);
+                return array_shift($updated);
+            }
+
             if ($added = $this->_observer->addedFiles()) {
                 echo self::createMsg('Added %s new file' . (count($added) > 1 ? 's' : ''), count($added), $added);
+                return array_shift($added);
             }
 
             if ($deleted = $this->_observer->deletedFiles()) {
                 echo self::createMsg('Deleted %s file' . (count($deleted) > 1 ? 's' : ''), count($deleted), $deleted);
-            }
-
-            if ($files = $this->_observer->updatedFiles()) {
-                return array_shift($files);
+                return array_shift($deleted);
             }
         }
         while (1);
@@ -49,7 +59,7 @@ class Phpwatcher
         return sprintf("{$msg}:{$suffix}%s\n", $counter, implode($suffix , $elements));
     }
 
-    public function listObservablesFiles()
+    public function listObservableFiles()
     {
         return $this->_observer->getFiles();
     }
@@ -73,7 +83,6 @@ class BruteForceWatcher
     public function header()
     {
         list($this->watch, $this->identifier) = $this->createList();
-        arsort($this->watch, SORT_NUMERIC);
         $this->lastUpdated = time();
 
         return array($this->paths, $this->watch);
@@ -83,13 +92,11 @@ class BruteForceWatcher
     {
         $actualWatch = $this->watch;
 
-        if (time() - $this->lastUpdated > 10) {
-            $this->lastUpdated = time();
-            list($this->watch, $this->identifier) = $this->createList();
-        }
+        $this->lastUpdated = time();
+        list($newWatch, $this->identifier) = $this->createList();
 
         $actualWatch = array_keys($actualWatch);
-        $newWatch    = array_keys($this->watch);
+        $newWatch    = array_keys($newWatch);
 
         return array($actualWatch, $newWatch);
     }
@@ -97,13 +104,33 @@ class BruteForceWatcher
     public function addedFiles()
     {
         list($actualWatch, $newWatch) = $this->checkChanges();
-        return array_diff($newWatch, $actualWatch);
+
+        $updated = array();
+
+        foreach (array_diff($newWatch, $actualWatch) as $_file) {
+            $file = new FileChangedWatcher($_file);
+            $file->setIsCreated();
+            $file->setPathIdentifier($this->identifier[$_file] . DIRECTORY_SEPARATOR);
+            $updated[] = $file;
+        }
+
+        return $updated;
     }
 
     public function deletedFiles()
     {
-        list($actualWatch, $newWatch) = $this->checkChanges();
-        return array_diff($actualWatch, $newWatch);
+        $updated = array();
+
+        foreach ($this->watch as $_file => $mtime) {
+            if (!is_file($_file)) {
+                $file = new FileChangedWatcher($_file);
+                $file->setIsDeleted();
+                $file->setPathIdentifier($this->identifier[$_file] . DIRECTORY_SEPARATOR);
+                $updated[] = $file;
+            }
+        }
+
+        return $updated;
     }
 
     public function updatedFiles()
@@ -117,7 +144,7 @@ class BruteForceWatcher
                 $this->watch[$_file] = $newmtime;
 
                 $file = new FileChangedWatcher($_file);
-                $file->setIsModified();
+                $file->setIsUpdated();
                 $file->setPathIdentifier($this->identifier[$_file] . DIRECTORY_SEPARATOR);
 
                 $updated[] = $file;
@@ -147,25 +174,64 @@ class BruteForceWatcher
             }
         }
 
+        arsort($watch, SORT_NUMERIC);
         return array($watch, $identifier);
     }
 };
 
-class FileChangedWatcher extends SplFileInfo
+class FileChangedWatcher
 {
-    private $_isCreated = false, $_isUpdated = false, $_isDeleted = false, $_identifier;
+    private $_file, $_isCreated = false, $_isUpdated = false, $_isDeleted = false, $_identifier;
 
-    public function __call($method, array $value)
+    public function __construct($file)
     {
-        if (preg_match('/setIs([A-Z])([A-Z]+)/', $method, $match)) {
-            $var = "_is{$match[1]}{$match[1]}";
-            return $this->$var = true;
-        }
+        $this->_file = $file;
+    }
 
-        if (preg_match('/get([A-Z])([A-Z]+)/', $method, $match)) {
-            $var = "_is{$match[1]}{$match[1]}";
-            return $this->$var;
-        }
+    public function getFile()
+    {
+        return $this->_file;
+    }
+
+    public function __toString()
+    {
+        return $this->getFile();
+    }
+
+    public function setIsDeleted()
+    {
+        $this->_isDeleted = true;
+        $this->_isCreated = false;
+        $this->_isUpdated = false;
+    }
+
+    public function setIsCreated()
+    {
+        $this->_isDeleted = false;
+        $this->_isCreated = true;
+        $this->_isUpdated = false;
+    }
+
+    public function setIsUpdated()
+    {
+        $this->_isDeleted = false;
+        $this->_isCreated = false;
+        $this->_isUpdated = true;
+    }
+
+    public function hasDeleted()
+    {
+        return $this->_isDeleted;
+    }
+
+    public function hasCreated()
+    {
+        return $this->_isCreated;
+    }
+
+    public function hasUpdated()
+    {
+        return $this->_isUpdated;
     }
 
     public function setPathIdentifier($identifier)
