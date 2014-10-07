@@ -93,7 +93,7 @@ class ChangeableCheckFiles
         $this->paths = $path;
         $this->regex = $regex;
 
-        if (class_exists('Thread') and false) {
+        if (method_exists('Thread', 'start') and false) {
             $this->worker = new WorkerFilesThreaded($this->paths, $this->regex);
         }
         else {
