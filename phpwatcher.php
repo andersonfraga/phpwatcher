@@ -3,7 +3,7 @@
 function phpwatcher($path, $pattern, Closure $func, $checkTo = PhpWatcher::ALL)
 {
     if (!empty($path) and is_string($path)) {
-        $path = array($path);
+        $path = [$path];
     }
 
     $path  = array_map('realpath', $path);
@@ -14,9 +14,17 @@ function phpwatcher($path, $pattern, Closure $func, $checkTo = PhpWatcher::ALL)
     }
 }
 
+if (!class_exists('Thread')) {
+    class Thread {}
+}
+
+if (!class_exists('Stackable')) {
+    class Stackable {}
+}
+
 class PhpWatcher
 {
-    private $_pattern, $_observer, $_flagsCheck, $_changedFiles = array();
+    private $_pattern, $_observer, $_flagsCheck, $_changedFiles = [];
 
     const UPDATE = 1;
     const CREATE = 2;
@@ -26,7 +34,7 @@ class PhpWatcher
     public function __construct(array $path, $pattern, $flagsCheck)
     {
         $this->_pattern    = $pattern;
-        $this->_observer   = new BruteForceWatcher($path, "/{$this->_pattern}/i");
+        $this->_observer   = new ChangeableCheckFiles($path, "/{$this->_pattern}/i");
         $this->_flagsCheck = $flagsCheck;
     }
 
@@ -48,33 +56,6 @@ class PhpWatcher
         do {
             $changedFileList     = $this->_observer->checkChanges($this->_flagsCheck);
             $this->_changedFiles = array_merge($this->_changedFiles, $changedFileList);
-
-            // if ($this->_flagsCheck & self::UPDATE) {
-            //    $this->_changedFiles = array_merge(
-            //        $this->_changedFiles,
-            //        array_filter($changedFileList, function ($item) {
-            //            return $item->hasUpdated();
-            //        })
-            //    );
-            // }
-
-            // if ($this->_flagsCheck & self::CREATE) {
-            //      $this->_changedFiles = array_merge(
-            //         $this->_changedFiles,
-            //         array_filter($changedFileList, function ($item) {
-            //             return $item->hasCreated();
-            //         })
-            //     );
-            // }
-
-            // if ($this->_flagsCheck & self::DELETE) {
-            //      $this->_changedFiles = array_merge(
-            //         $this->_changedFiles,
-            //         array_filter($changedFileList, function ($item) {
-            //             return $item->hasDeleted();
-            //         })
-            //     );
-            // }
 
             if (count($this->_changedFiles)) {
                 return self::shiftFile($this->_changedFiles);
@@ -103,14 +84,21 @@ class PhpWatcher
     }
 };
 
-class BruteForceWatcher
+class ChangeableCheckFiles
 {
-    private $paths = array(), $currentListWatch = array(), $identifierPaths = array(), $regex, $lastUpdated;
+    private $paths = [], $currentListWatch = [], $identifierPaths = [], $regex, $lastUpdated, $worker;
 
     function __construct(array $path, $regex)
     {
         $this->paths = $path;
         $this->regex = $regex;
+
+        if (class_exists('Thread') and false) {
+            $this->worker = new WorkerFilesThreaded($this->paths, $this->regex);
+        }
+        else {
+            $this->worker = new WorkerFilesForce($this->paths, $this->regex);
+        }
     }
 
     public function getFiles()
@@ -123,18 +111,13 @@ class BruteForceWatcher
         list($this->currentListWatch, $this->identifierPaths) = $this->createList();
         $this->lastUpdated = time();
 
-        return array($this->paths, $this->currentListWatch);
+        return [$this->paths, $this->currentListWatch];
     }
 
     public function checkChanges($flags)
     {
-        $changedFiles = array();
-
-        // if (time() - $this->lastUpdated > 60*5) {
-        //     $this->header();
-        // }
-
         list($newWatchFiles, $newIdentifiers) = $this->createList();
+        $changedFiles = [];
 
         // Não existe na lista atual, somente na nova
         if ($flags & PhpWatcher::CREATE) {
@@ -178,34 +161,6 @@ class BruteForceWatcher
             }
         }
 
-        // foreach (array_merge(array_keys($this->currentListWatch), array_keys($newWatchFiles)) as $file) {
-        //     $fileWatcher = new FileChangedWatcher($file);
-
-        //     if (isset($this->identifierPaths[$file])) {
-        //         $fileWatcher->setPathIdentifier($this->identifierPaths[$file] . DIRECTORY_SEPARATOR);
-        //     }
-        //     else if (isset($newIdentifiers[$file])) {
-        //         $fileWatcher->setPathIdentifier($newIdentifiers[$file] . DIRECTORY_SEPARATOR);
-        //     }
-
-        //     // Não existe na lista atual, somente na nova
-        //     if (!isset($this->currentListWatch[$file])) {
-        //         $fileWatcher->setIsCreated();
-        //         $changedFiles[] = $fileWatcher;
-        //     }
-        //     // Não existe na nova, somente na lista atual
-        //     else if (!isset($newWatchFiles[$file])) {
-        //         $fileWatcher->setIsDeleted();
-        //         $changedFiles[] = $fileWatcher;
-        //     }
-        //     // Tem diferença entre uma e outra :)
-        //     else if ($this->currentListWatch[$file] != $newWatchFiles[$file]) {
-        //         $fileWatcher->setIsUpdated();
-        //         $this->currentListWatch[$file] = $newWatchFiles[$file];
-        //         $changedFiles[] = $fileWatcher;
-        //     }
-        // }
-
         if ($changedFiles) {
             $this->lastUpdated      = time();
             $this->identifierPaths  = $newIdentifiers;
@@ -217,25 +172,145 @@ class BruteForceWatcher
 
     private function createList()
     {
-        $watch = $identifier = array();
+        $storage = $this->worker->get();
+        //arsort($watch, SORT_NUMERIC);
+        return [$storage->getList(), $storage->getIdentifiers()];
+    }
+};
 
-        foreach ($this->paths as $value) {
-            $listPaths = new RegexIterator(
-                new RecursiveIteratorIterator(
-                    new RecursiveDirectoryIterator($value),
-                    RecursiveIteratorIterator::SELF_FIRST
-                ),
-                $this->regex
-            );
+class WorkerFilesForce
+{
+    private $paths, $regex;
 
-            foreach ($listPaths as $file => $_path) {
-                $watch[$file]      = $_path->getMTime();
-                $identifier[$file] = $value;
+    function __construct($path, $regex)
+    {
+        $this->paths = $path;
+        $this->regex = $regex;
+    }
+
+    public function get()
+    {
+        $storage = new StorageFilesForced();
+
+        foreach ($this->paths as $path) {
+            $item = new GlobFilesForced($path, $this->regex, $storage);
+            $item->run();
+        }
+
+        return $storage;
+    }
+};
+
+class WorkerFilesThreaded
+{
+    private $paths, $regex;
+
+    function __construct($path, $regex)
+    {
+        $this->paths = $path;
+        $this->regex = $regex;
+    }
+
+    public function get()
+    {
+        $glob    = [];
+        $storage = new StorageFilesThreaded();
+
+        foreach ($this->paths as $path) {
+            $glob[$path] = new GlobFilesThreaded($path, $this->regex, $storage);
+        }
+
+        foreach ($glob as $item) {
+            $item->start();
+        }
+
+        while ($item = array_shift($glob)) {
+            if ($item->isRunning()) {
+                array_push($glob, $item);
             }
         }
 
-        //arsort($watch, SORT_NUMERIC);
-        return array($watch, $identifier);
+        return $storage;
+    }
+};
+
+class GlobFilesForced
+{
+    use GlobFilesTrait;
+};
+
+class StorageFilesForced
+{
+    use StorageFilesTrait;
+};
+
+class GlobFilesThreaded extends Thread
+{
+    use GlobFilesTrait;
+};
+
+class StorageFilesThreaded extends Stackable
+{
+    use StorageFilesTrait;
+
+    public function run() {}
+};
+
+trait StorageFilesTrait
+{
+    private $listFiles = [], $listIdentifiers = [];
+
+    public function getList()
+    {
+        return $this->listFiles;
+    }
+
+    public function getIdentifiers()
+    {
+        return $this->listIdentifiers;
+    }
+
+    public function addInList($list)
+    {
+        $this->listFiles = array_merge($this->listFiles, $list);
+    }
+
+    public function addInIdentifiers($list)
+    {
+        $this->listIdentifiers = array_merge($this->listIdentifiers, $list);
+    }
+};
+
+trait GlobFilesTrait
+{
+    private $path, $regex, $storage;
+
+    function __construct($path, $regex, $storage)
+    {
+        $this->path    = $path;
+        $this->regex   = $regex;
+        $this->storage = $storage;
+    }
+
+    public function run()
+    {
+        $listPaths = new RegexIterator(
+            new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($this->path),
+                RecursiveIteratorIterator::SELF_FIRST
+            ),
+            $this->regex
+        );
+
+        $watching = $identifiers = [];
+
+        foreach ($listPaths as $file => $_path) {
+            $watching[$file]    = $_path->getMTime();
+            $identifiers[$file] = $this->path;
+        }
+
+        $this->storage->addInList($watching);
+        $this->storage->addInIdentifiers($identifiers);
     }
 };
 
