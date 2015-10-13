@@ -1,12 +1,20 @@
 <?php
 
-function phpwatcher($path, $pattern, Closure $func, $checkTo = PhpWatcher::ALL)
+function phpwatcher($paths, $pattern, Closure $func, $checkTo = PhpWatcher::ALL)
 {
-    if (!empty($path) and is_string($path)) {
-        $path = [$path];
+    if (!empty($paths) and is_string($paths)) {
+        $paths = [$paths];
     }
 
-    $path  = array_map('realpath', $path);
+    $path = array_filter($paths, function ($_path) {
+        return is_dir($_path);
+    });
+
+    if ($notFound = array_diff($paths, $path)) {
+        echo 'Warning! Paths not found: ' . implode(', ', $notFound) . PHP_EOL;
+    }
+
+    $path = array_map('realpath', array_values($path));
     $watch = new PhpWatcher($path, $pattern, $checkTo);
 
     while($file = $watch->hasChanges()) {
@@ -60,6 +68,8 @@ class PhpWatcher
             if (count($this->_changedFiles)) {
                 return self::shiftFile($this->_changedFiles);
             }
+
+            sleep(1);
         }
         while (1);
     }
@@ -226,6 +236,7 @@ class WorkerFilesThreaded
 
         while ($item = array_shift($glob)) {
             if ($item->isRunning()) {
+                sleep(1);
                 array_push($glob, $item);
             }
         }
